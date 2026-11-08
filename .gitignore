@@ -1,0 +1,24 @@
+# Keil MDK build outputs
+*.o
+*.d
+*.crf
+*.axf
+*.hex
+*.bin
+*.lnp
+*.map
+*.lst
+*.htm
+*.build_log.htm
+*.dep
+*.sct
+*.scvd
+*.iex
+*.bak
+*.Bak
+*.uvguix.*
+*.zip
+
+# Keil/J-Link debug traces
+JLinkLog.txt
+JLinkSettings.ini
