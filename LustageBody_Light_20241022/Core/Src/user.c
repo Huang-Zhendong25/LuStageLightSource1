@@ -189,6 +189,9 @@ MCP4728_Config_TypeDef MCP4728_3_Config_Struct =
 
 static int8_t Temp_Filter_5Get1_Handler(int8_t *pData);
 
+static void Comm_Send_Data(uint8_t *pData,uint16_t Len);
+static void Comm_Send_Temperature_Response(uint16_t Light_ID,int8_t Temp);
+
 /* 数据发送函数 */
 //static void Comm_Send_Data(uint8_t cmd_id,uint8_t cmd,uint8_t *data,uint8_t len);
 //static void Comm_Send_Data(uint8_t *Data,uint8_t Len);
@@ -601,6 +604,17 @@ void Comm_Function_Handler(void)
 			}
 			break;			
 			
+			case CMD_INFO_LightSource_Temperature:                    /*查询指定光源灯板温度*/
+			{
+				uint16_t Query_ID = (Comm_Function_Struct.Format_Data.Data[1]<<8) + Comm_Function_Struct.Format_Data.Data[0];
+
+				if(LED_Para_Struct.Device_ID == Query_ID)
+				{
+					Comm_Send_Temperature_Response(LED_Para_Struct.Device_ID, LED_Para_Struct.Temp_Current);
+				}
+			}
+			break;			
+
 			default :
 			{
 				
@@ -611,34 +625,38 @@ void Comm_Function_Handler(void)
 }
 
 /* 数据发送函数 */
-//static void Comm_Send_Data(uint8_t *Data,uint8_t Len)
-//{
-//	uint8_t *pData;
-//	uint8_t sum = 0;
-//	
-//	pData = Comm_TxBuff;	
+static uint8_t Comm_RespBuff[16];                                   /* 应答发送缓冲区 */
 
-////		*pData++ = Data[0];
-////		*pData++ = Data[1];
-////		*pData++ = Data[2];
-////		*pData++ = Data[3];
-////	  *pData++ = Data[4];
+static void Comm_Send_Data(uint8_t *pData,uint16_t Len)
+{
+	HAL_UART_AbortReceive(&Comm_Uart);                              /* 先停掉常驻接收，避免自发自收 */
+	RS485_Mode_Tx();
+	HAL_UART_Transmit_DMA(&Comm_Uart,pData,Len);
+	/* 发送完成后在 HAL_UART_TxCpltCallback 中切回接收并重新挂起RX */
+}
 
-//		for( uint8_t i = 0 ; i < Len-1 ; i++ )
-//		{
-//			sum += *pData++ = Data[i];
-//		}
+static void Comm_Send_Temperature_Response(uint16_t Light_ID,int8_t Temp)
+{
+	uint8_t sum = 0;
 
-//		*pData++ = sum;
-//		
-//		RS485_Mode_Tx();
+	Comm_RespBuff[0] = 0x4C;                                        /* 帧头 L */
+	Comm_RespBuff[1] = 0x55;                                        /* 帧头 U */
+	Comm_RespBuff[2] = 0x05;                                        /* Len 低字节 */
+	Comm_RespBuff[3] = 0x00;                                        /* Len 高字节 */
+	Comm_RespBuff[4] = 0x03;                                        /* Cmd 高字节 0x0355 */
+	Comm_RespBuff[5] = 0x55;                                        /* Cmd 低字节 0x0355 */
+	Comm_RespBuff[6] = (uint8_t)(Light_ID & 0xFF);                  /* 光源ID 低字节 */
+	Comm_RespBuff[7] = (uint8_t)((Light_ID >> 8) & 0xFF);           /* 光源ID 高字节 */
+	Comm_RespBuff[8] = (uint8_t)Temp;                               /* 当前温度 */
 
-//		
-//		HAL_UART_Transmit_DMA(&Comm_Uart,Comm_TxBuff,pData - Comm_TxBuff);
+	for(uint8_t i = 4 ; i < 9 ; i++)
+	{
+		sum += Comm_RespBuff[i];
+	}
+	Comm_RespBuff[9] = sum;                                         /* 校验和 */
 
-//}
-
-
+	Comm_Send_Data(Comm_RespBuff,10);
+}
 
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
@@ -653,7 +671,12 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
 	if(huart == &Comm_Uart)
 	{
+		uint32_t Timeout = 10000;
+		while((!__HAL_UART_GET_FLAG(huart, UART_FLAG_TC)) && (Timeout--))
+		{
+		}
 		RS485_Mode_Rx();
+		HAL_UARTEx_ReceiveToIdle_DMA(&Comm_Uart,Comm_RxBuff,Comm_RxBuffSzie);
 	}
 }
 

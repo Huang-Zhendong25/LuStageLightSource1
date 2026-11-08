@@ -462,6 +462,7 @@ struct
 #define CMD_Set_Firmware_Update_ready          0x04AA             /*固件升级准备*/
 #define CMD_Set_Firmware_Update_data           0x05AA             /*固件升级数据配置*/
 #define CMD_Set_Firmware_Update_start          0x09AA             /*开始固件升级*/
+#define CMD_INFO_LightSource_Temperature        0x0355             /*查询指定光源灯板温度*/
 
 void Comm_Init(void);
 
