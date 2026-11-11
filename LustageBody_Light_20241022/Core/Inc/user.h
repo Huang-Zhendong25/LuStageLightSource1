@@ -462,7 +462,7 @@ struct
 #define CMD_Set_Firmware_Update_ready          0x04AA             /*固件升级准备*/
 #define CMD_Set_Firmware_Update_data           0x05AA             /*固件升级数据配置*/
 #define CMD_Set_Firmware_Update_start          0x09AA             /*开始固件升级*/
-#define CMD_INFO_LightSource_Temperature        0x0355             /*查询指定光源灯板温度*/
+#define CMD_INFO_LightSource_Temperature       0x0355             /*查询指定光源灯板温度*/
 
 void Comm_Init(void);
 
@@ -494,9 +494,9 @@ void LED_Relighting_state_Updata(void);
 /* 温度保护处理 */
 void LED_OTP_Handler(void);
 
+static void Comm_Send_Temperature_Response(uint16_t Light_ID,int8_t Temp);
 
-
-
+static void Comm_Send_Data(uint8_t *pData,uint16_t Len);
 #endif
 
 

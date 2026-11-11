@@ -189,9 +189,6 @@ MCP4728_Config_TypeDef MCP4728_3_Config_Struct =
 
 static int8_t Temp_Filter_5Get1_Handler(int8_t *pData);
 
-static void Comm_Send_Data(uint8_t *pData,uint16_t Len);
-static void Comm_Send_Temperature_Response(uint16_t Light_ID,int8_t Temp);
-
 /* 数据发送函数 */
 //static void Comm_Send_Data(uint8_t cmd_id,uint8_t cmd,uint8_t *data,uint8_t len);
 //static void Comm_Send_Data(uint8_t *Data,uint8_t Len);
@@ -602,8 +599,8 @@ void Comm_Function_Handler(void)
 				HAL_NVIC_SystemReset();
 				}
 			}
-			break;			
-			
+			break;	
+
 			case CMD_INFO_LightSource_Temperature:                    /*查询指定光源灯板温度*/
 			{
 				uint16_t Query_ID = (Comm_Function_Struct.Format_Data.Data[1]<<8) + Comm_Function_Struct.Format_Data.Data[0];
@@ -614,7 +611,7 @@ void Comm_Function_Handler(void)
 				}
 			}
 			break;			
-
+			
 			default :
 			{
 				
@@ -623,10 +620,34 @@ void Comm_Function_Handler(void)
 		}
 	}
 }
-
+static uint8_t Comm_RespBuff[16]; 
 /* 数据发送函数 */
-static uint8_t Comm_RespBuff[16];                                   /* 应答发送缓冲区 */
+//static void Comm_Send_Data(uint8_t *Data,uint8_t Len)
+//{
+//	uint8_t *pData;
+//	uint8_t sum = 0;
+//	
+//	pData = Comm_TxBuff;	
 
+////		*pData++ = Data[0];
+////		*pData++ = Data[1];
+////		*pData++ = Data[2];
+////		*pData++ = Data[3];
+////	  *pData++ = Data[4];
+
+//		for( uint8_t i = 0 ; i < Len-1 ; i++ )
+//		{
+//			sum += *pData++ = Data[i];
+//		}
+
+//		*pData++ = sum;
+//		
+//		RS485_Mode_Tx();
+
+//		
+//		HAL_UART_Transmit_DMA(&Comm_Uart,Comm_TxBuff,pData - Comm_TxBuff);
+
+//}
 static void Comm_Send_Data(uint8_t *pData,uint16_t Len)
 {
 	HAL_UART_AbortReceive(&Comm_Uart);                              /* 先停掉常驻接收，避免自发自收 */
@@ -671,13 +692,19 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
 	if(huart == &Comm_Uart)
 	{
-		uint32_t Timeout = 10000;
-		while((!__HAL_UART_GET_FLAG(huart, UART_FLAG_TC)) && (Timeout--))
-		{
-		}
-		RS485_Mode_Rx();
+		RS485_Mode_Rx();			
 		HAL_UARTEx_ReceiveToIdle_DMA(&Comm_Uart,Comm_RxBuff,Comm_RxBuffSzie);
 	}
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart == &Comm_Uart)
+    {
+        __HAL_UART_CLEAR_OREFLAG(huart);
+        HAL_UART_AbortReceive(huart);
+        HAL_UARTEx_ReceiveToIdle_DMA(huart, Comm_RxBuff, Comm_RxBuffSzie);
+    }
 }
 
 

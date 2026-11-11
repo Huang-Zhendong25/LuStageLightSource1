@@ -42,20 +42,60 @@
 - Cmd = 0x0355（与查询一致）。
 - TEMP = 当前温度，0x00~0x7D 对应 0~125℃。
 
-## 3. 本功能在光源侧的改动
+## 3. 相对原始代码的改进及原因
 
-### 修改文件
+### 3.1 新增 0x0355 温度查询应答
 
-- `LustageBody_Light_20241022/Core/Inc/user.h`
-- `LustageBody_Light_20241022/Core/Src/user.c`
+原始光源只接收控制板广播的命令并执行（调光、数码管、固件升级等），**没有任何主动回传能力**。
 
-### 3.1 新增命令字（user.h）
+本实现新增 `case CMD_INFO_LightSource_Temperature`，当帧内“光源ID”与自身 `Device_ID` 相等时，回传 10 字节温度应答。
+
+- 原因：协议要求被查询的光源返回 `4C 55 05 00 03 55 ID ID TEMP CS`。
+- 温度值直接取 `LED_Para_Struct.Temp_Current`（`LED_OTP_Handler` 已周期维护，18B20 采集 + 5 取 1 中值滤波），不在查询时临时读 18B20，避免阻塞。
+
+### 3.2 发送前中止常驻 RX（`HAL_UART_AbortReceive`）
+
+`Comm_Send_Data` 发送前先中止常驻的 `HAL_UARTEx_ReceiveToIdle_DMA`。
+
+- 原因：若硬件 485 存在自发自收 / 回环，光源发出的 10 字节应答会被自己的 RX 重新收进来，再被当成一条 `0x0355` 命令 → 再次匹配 ID → 再次应答，形成无限循环。中止 RX 可彻底避免。
+
+### 3.3 发送完成后重新挂起 RX（`HAL_UART_TxCpltCallback`）
+
+发送完成回调里除了 `RS485_Mode_Rx()`，还重新调用 `HAL_UARTEx_ReceiveToIdle_DMA`。
+
+- 原因：发送前中止了 RX，所以发送完成后必须重新挂起，否则后续任何命令都收不到。
+
+### 3.4 新增 `HAL_UART_ErrorCallback` 错误恢复
 
 ```c
-#define CMD_INFO_LightSource_Temperature        0x0355
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart == &Comm_Uart)
+    {
+        __HAL_UART_CLEAR_OREFLAG(huart);
+        HAL_UART_AbortReceive(huart);
+        HAL_UARTEx_ReceiveToIdle_DMA(huart, Comm_RxBuff, Comm_RxBuffSzie);
+    }
+}
 ```
 
-### 3.2 新增查询处理分支（user.c, Comm_Function_Handler）
+- 原因：RS485 总线噪声 / 过载（ORE）等错误会把常驻接收挂死；在错误回调里清 ORE、中止并重新挂起，可保证长期运行不丢接收。
+
+### 3.5 去掉中断里的等待循环
+
+`HAL_UART_TxCpltCallback` 里**不再**写 `while(!TC)` 等待循环。
+
+- 原因：本工程 HAL 的 TxCpltCallback 是在 UART **TC 中断**里被调用的，此时 TC 已置位、最后一字节已移出，无需再等；且中断里长时间等待是坏习惯。
+
+## 4. 实现细节
+
+### 4.1 命令字定义（user.h）
+
+```c
+#define CMD_INFO_LightSource_Temperature       0x0355
+```
+
+### 4.2 查询处理分支（user.c, Comm_Function_Handler）
 
 ```c
 case CMD_INFO_LightSource_Temperature:
@@ -72,12 +112,9 @@ case CMD_INFO_LightSource_Temperature:
 break;
 ```
 
-要点：
+要点：只精确匹配 `Device_ID`，不响应 `0xFFFF` 广播 ID，保证“单灯查询、单灯应答”，避免 485 总线冲突。
 
-- 只有帧内 ID 与自身 `Device_ID` 相等的光源才应答，保证“单灯查询、单灯应答”，避免 485 总线冲突。
-- 温度值直接取 `LED_Para_Struct.Temp_Current`（`LED_OTP_Handler` 已周期维护，18B20 采集 + 5 取 1 中值滤波）。
-
-### 3.3 应答发送函数
+### 4.3 应答发送函数（user.c）
 
 ```c
 static uint8_t Comm_RespBuff[16];   // 全局缓冲，避免DMA期间局部变量失效
@@ -87,7 +124,7 @@ static void Comm_Send_Data(uint8_t *pData, uint16_t Len)
     HAL_UART_AbortReceive(&Comm_Uart);   // 先停掉常驻RX，避免自发自收/回环
     RS485_Mode_Tx();
     HAL_UART_Transmit_DMA(&Comm_Uart, pData, Len);
-    // DE回接收由 HAL_UART_TxCpltCallback 完成
+    // DE回接收 + 重挂RX 由 HAL_UART_TxCpltCallback 完成
 }
 
 static void Comm_Send_Temperature_Response(uint16_t Light_ID, int8_t Temp)
@@ -100,9 +137,9 @@ static void Comm_Send_Temperature_Response(uint16_t Light_ID, int8_t Temp)
     Comm_RespBuff[3] = 0x00;   // Len 高字节
     Comm_RespBuff[4] = 0x03;   // Cmd 高字节 0x0355
     Comm_RespBuff[5] = 0x55;   // Cmd 低字节 0x0355
-    Comm_RespBuff[6] = (uint8_t)(Light_ID & 0xFF);        // 光源ID 低字节
-    Comm_RespBuff[7] = (uint8_t)((Light_ID >> 8) & 0xFF); // 光源ID 高字节
-    Comm_RespBuff[8] = (uint8_t)Temp;                     // 当前温度
+    Comm_RespBuff[6] = (uint8_t)(Light_ID & 0xFF);
+    Comm_RespBuff[7] = (uint8_t)((Light_ID >> 8) & 0xFF);
+    Comm_RespBuff[8] = (uint8_t)Temp;
 
     for(uint8_t i = 4 ; i < 9 ; i++)
     {
@@ -114,34 +151,36 @@ static void Comm_Send_Temperature_Response(uint16_t Light_ID, int8_t Temp)
 }
 ```
 
-### 3.4 485 方向与接收恢复
+### 4.4 485 方向与接收恢复
 
 ```c
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     if(huart == &Comm_Uart)
     {
-        uint32_t Timeout = 10000;
-        while((!__HAL_UART_GET_FLAG(huart, UART_FLAG_TC)) && (Timeout--))
-        {
-        }
         RS485_Mode_Rx();
         HAL_UARTEx_ReceiveToIdle_DMA(&Comm_Uart, Comm_RxBuff, Comm_RxBuffSzie);
     }
 }
 ```
 
-要点：
+## 5. 修改过程注意事项（经验教训）
 
-- 等 UART 真正“发送完成(TC)”再拉低 DE 切回接收，保证最后 1 字节/停止位不被截断。
-- 发完后立即重新挂起 `ReceiveToIdle_DMA`，恢复常驻接收。
+1. **应答缓冲区必须用全局 / 静态**：`HAL_UART_Transmit_DMA` 是异步的，函数返回后 DMA 仍在读缓冲区，局部变量会被销毁导致乱码。
+2. **发送前要中止常驻 RX**：485 半双工 + 自发自收的硬件上，不中止 RX 会把自身应答当命令再次处理，造成死循环。
+3. **发送完成要重挂 RX**：中止过 RX 就必须在发送完成回调里重新挂起，否则后续命令收不到。
+4. **中断里不要 busy-wait**：`while(!TC)` 等待是多余的（TC 中断里 TC 已置位），也违反“中断要短”的原则。
+5. **要加 `HAL_UART_ErrorCallback` 恢复**：485 总线抖动产生的 ORE/FE 错误会挂死接收，必须清 ORE 并重新挂起。
+6. **命令字字节序**：光源侧按大端解析 `Cmd[0]<<8 + Cmd[1]`，应答帧里 Cmd 也写大端 `03 55`；与控制板内部值（0x5503）不是一回事。
+7. **只精确匹配 ID 应答**：不要响应 `0xFFFF` 广播，否则多灯同时回包会冲突。
+8. **温度查询不要临时读 18B20**：直接使用 `LED_OTP_Handler` 周期维护好的 `Temp_Current`，避免在命令处理里做长时间阻塞操作。
 
-## 4. 编译与烧录
+## 6. 编译与烧录
 
 - 用 Keil MDK 打开 `LustageBody_Light_20241022/MDK-ARM/LustageBody_Light_20240218.uvprojx` 编译。
 - 通过 SWD/ST-Link（或项目使用的烧录方式）烧录到光源板。
 
-## 5. 单灯验证（USB-485 直连）
+## 7. 单灯验证（USB-485 直连）
 
 1. 光源正常供电，USB-485 接光源 RS485 A/B（A、B 接反则对调）。
 2. 串口助手：`250000, 8, N, 1`；HEX 发送/显示。
@@ -159,12 +198,6 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 
 例如温度 30℃（0x1E）：`4C 55 05 00 03 55 01 00 1E 77`。
 
-## 6. 联调（与控制板配合）
+## 8. 联调（与控制板配合）
 
 完整链路：PC 发 UDP 查询 -> 控制板广播到 8 路 RS485 -> 被查询光源应答 -> 控制板 UDP 转回 PC。详见控制板仓库 README。
-
-## 7. 注意事项
-
-- 应答 Cmd 与查询一致，均为 `0x0355`（大端 `03 55`）。
-- 发送前会 `HAL_UART_AbortReceive` 停掉常驻 RX；若实际硬件存在总线回环，该处理可避免“自发自收导致重复应答”。
-- 只精确匹配 `Device_ID`，不响应 `0xFFFF` 广播 ID（保证单灯应答）。
