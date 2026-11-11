@@ -164,7 +164,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 }
 ```
 
-## 5. 修改过程注意事项（经验教训）
+## 5. 修改过程注意事项
 
 1. **应答缓冲区必须用全局 / 静态**：`HAL_UART_Transmit_DMA` 是异步的，函数返回后 DMA 仍在读缓冲区，局部变量会被销毁导致乱码。
 2. **发送前要中止常驻 RX**：485 半双工 + 自发自收的硬件上，不中止 RX 会把自身应答当命令再次处理，造成死循环。
@@ -180,24 +180,6 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 - 用 Keil MDK 打开 `LustageBody_Light_20241022/MDK-ARM/LustageBody_Light_20240218.uvprojx` 编译。
 - 通过 SWD/ST-Link（或项目使用的烧录方式）烧录到光源板。
 
-## 7. 单灯验证（USB-485 直连）
-
-1. 光源正常供电，USB-485 接光源 RS485 A/B（A、B 接反则对调）。
-2. 串口助手：`250000, 8, N, 1`；HEX 发送/显示。
-3. 发查询帧（查 ID=1）：
-
-   ```
-   4C 55 04 00 03 55 01 00 59
-   ```
-
-4. 期望收到：
-
-   ```
-   4C 55 05 00 03 55 01 00 <TEMP> <CS>
-   ```
-
-例如温度 30℃（0x1E）：`4C 55 05 00 03 55 01 00 1E 77`。
-
-## 8. 联调（与控制板配合）
+## 7. 联调（与控制板配合）
 
 完整链路：PC 发 UDP 查询 -> 控制板广播到 8 路 RS485 -> 被查询光源应答 -> 控制板 UDP 转回 PC。详见控制板仓库 README。
