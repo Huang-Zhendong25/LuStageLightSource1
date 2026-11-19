@@ -26,6 +26,7 @@
 #include "bsp_flash.h"
 #include "tm1650.h"
 #include "drv_18b20.h"
+#include "rgbwac.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -344,7 +345,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -892,7 +893,8 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(LED_PA3_GPIO_Port, LED_PA3_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, SPI1_CS_Pin|Reserve_PWM_Pin|VCSEL_TRIG_OUT_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOC, Reserve_PWM_Pin|VCSEL_TRIG_OUT_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(SPI1_CS_GPIO_Port, SPI1_CS_Pin, GPIO_PIN_SET); /* Flash 空闲时释放低有效片选。 */
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, LIGHT_FAN_Pin|IIC3_LDAC_Pin|IIC2_LDAC_Pin|IIC1_LDAC_Pin, GPIO_PIN_RESET);
@@ -971,6 +973,17 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
 	if(GPIO_Pin & TRIG_MCU_Pin)
 	{
+        /* 六通道只对软启动后的首个有效触发执行 TIM6 防抖。 */
+        if(Rgbwac_IsSelected())
+        {
+            if(Rgbwac_IsArmed())
+            {
+                __HAL_TIM_CLEAR_IT(&htim6, TIM_IT_UPDATE);
+                __HAL_TIM_SetCounter(&htim6, 0);
+                HAL_TIM_Base_Start_IT(&htim6);
+            }
+            return;
+        }
      __HAL_TIM_CLEAR_IT(&htim6, TIM_IT_UPDATE);         
 		 __HAL_TIM_SetCounter(&htim6, 0);        /*开启定时器6，5us后中断检测触发电平，防抖动*/
 					HAL_TIM_Base_Start_IT(&htim6);
@@ -1068,6 +1081,13 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	else if(htim == &htim6)              /*5us后检测触发电平*/	
 	{
 		LED_Para_Struct.Trig_Level = HAL_GPIO_ReadPin(TRIG_MCU_GPIO_Port,TRIG_MCU_Pin);
+        if(Rgbwac_IsSelected())
+        {
+            /* 此处只记录启动事件，换帧由主循环按 TIM1 的到期标志推进。 */
+            if(LED_Para_Struct.Trig_Level) Rgbwac_Trigger();
+            HAL_TIM_Base_Stop_IT(&htim6);
+            return;
+        }
 		if(LED_Para_Struct.Trig_Level)     /*触发有效*/
 		{					
 			  LED_Para_Struct.Trig_Cnt++;	

@@ -464,6 +464,7 @@ struct
 #define CMD_Set_Firmware_Update_start          0x09AA             /*开始固件升级*/
 #define CMD_INFO_LightSource_Temperature       0x0355             /*查询指定光源灯板温度*/
 
+extern LED_Para_TypeDef LED_Para_Struct;
 void Comm_Init(void);
 
 

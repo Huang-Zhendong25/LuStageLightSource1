@@ -7,6 +7,7 @@
 #include "tm1650.h"
 #include "drv_mcp4728.h"
 #include "bsp_flash.h"
+#include "rgbwac.h"
 
 
 #define Comm_Frame_RxSize       0x06              /* 一帧数据6字节 */
@@ -22,8 +23,6 @@
 
 uint8_t Comm_RxBuff[Comm_RxBuffSzie];        /* 接收缓冲区 */
 uint8_t Comm_TxBuff[Comm_TxBuffSzie];        /* 发送缓冲区 */
-
-
 
 #define Comm_Valid    1                      /* 数据有效 */
 #define Comm_Invalid  0                      /* 数据无效 */
@@ -137,7 +136,7 @@ typedef struct
 	uint8_t ID[2];                          /* 设备ID */
 	uint8_t Data_Len[2];                    /* 数据长度 */
 	uint8_t Cmd[2];                         /* 命令字符 */
-	uint8_t Data[600];                     /* 数据 */
+	uint8_t Data[800];                     /* 数据 */
 	uint8_t sum;                         /* 校验和 */
 }Comm_Format_TypeDef;           
 													           
@@ -159,9 +158,18 @@ LED_Para_TypeDef LED_Para_Struct ;  /*LED结构体*/
 
 Bootloader_Address_Typedef  Bootloader_Address_Struct;
 
-Material_solve_parameter_Typedef  Material_solve_parameter_Struct ;
-OLAT_parameter_Typedef     OLAT_parameter_Struct ;
-Relighting_parameter_Typedef  Relighting_parameter_Struct ;
+/* Scratch storage only: initialization and parameter-save run sequentially in main.
+ * Each member is filled completely before use; live LED_Para_Struct arrays never alias. */
+static union
+{
+    Material_solve_parameter_Typedef material;
+    OLAT_parameter_Typedef olat;
+    Relighting_parameter_Typedef relighting;
+} Parameter_Scratch;
+#define Material_solve_parameter_Struct Parameter_Scratch.material
+#define OLAT_parameter_Struct           Parameter_Scratch.olat
+#define Relighting_parameter_Struct     Parameter_Scratch.relighting
+
 
 //Material_solve_parameter_Typedef  Bootloader_Address_Struct;
 
@@ -204,26 +212,19 @@ void Comm_Init(void)
 
 static void Comm_Frame_Handler(uint8_t *pData,uint16_t Size)
 {
-	uint8_t sum = 0;
-	uint16_t  data_len;
-	data_len = (pData[Comm_RxFrame_Len+1]<<8) +  pData[Comm_RxFrame_Len];    //数据长度两个字节
-	
-	if( Size >= Comm_Frame_RxSize)
-	{
-		for(uint16_t i = 0 ; i < data_len; i++)
-		{
-			sum += pData[i+4];
-		}
-		Comm_Function_Struct.Format_Data.sum = sum;
-		if(sum == pData[data_len+4])
-		{
-			if(Comm_Header_1 == pData[Comm_RxFrame_Header1] && (pData[Comm_RxFrame_Header2] == Comm_Header_2)) /*帧头4C  55*/
-			{
-				Comm_Function_Struct.valid = Comm_Valid;
-				memcpy(&Comm_Function_Struct.Format_Data.ID,pData,(data_len + 5));				
-			}
-		}
-	}
+    uint8_t sum = 0;
+    uint16_t data_len, i;
+    /* Validate actual DMA size before indexing or copying an untrusted length. */
+    if((Size < 7) || (Size > Comm_RxBuffSzie)) return;
+    if((pData[0] != Comm_Header_1) || (pData[1] != Comm_Header_2)) return;
+    data_len = (uint16_t)pData[2] | ((uint16_t)pData[3] << 8);
+    if((data_len < 2) || (data_len > sizeof(Comm_Function_Struct.Format_Data.Data) + 2) ||
+       ((uint32_t)data_len + 5 != Size)) return;
+    for(i = 0; i < data_len; ++i) sum += pData[i + 4];
+    if(sum != pData[data_len + 4]) return;
+    memcpy(&Comm_Function_Struct.Format_Data.ID, pData, Size);
+    Comm_Function_Struct.Format_Data.sum = sum;
+    Comm_Function_Struct.valid = Comm_Valid;
 }
 
 #define ParameterMem_Default  0x55
@@ -234,6 +235,51 @@ FlashParam_TypeDef FlashParam_Struct = {0};
 
 
 
+
+/* 首次进入六通道模式时，停止原模式的触发、定时器和输出，避免同时控制灯板。 */
+static void RGBWAC_Stop_Legacy_Output(void)
+{
+    TIM_HandleTypeDef *const timers[] = {&htim2, &htim3, &htim4, &htim5, &htim6,
+                                        &htim7, &htim8, &htim9, &htim10, &htim12};
+    unsigned int i;
+
+    HAL_NVIC_DisableIRQ(EXTI0_IRQn);
+    for(i = 0; i < sizeof(timers) / sizeof(timers[0]); ++i)
+    {
+        HAL_TIM_Base_Stop_IT(timers[i]);
+        __HAL_TIM_CLEAR_IT(timers[i], TIM_IT_UPDATE);
+    }
+    LED_Para_Struct.Start_LED_TRIG_Flag = 0;
+    LED_Para_Struct.Start_LED_TRIG_ON = 0;
+    LED_Para_Struct.Start_Camera_TRIG_Flag = 0;
+    LED_Para_Struct.Idle_Flag = 0;
+    LED_Para_Struct.Relighting_State_LED = LIGHT_OFF;
+    LED_Para_Struct.CR_LED_State = LIGHT_OFF;
+    LED_Para_Struct.CG_LED_State = LIGHT_OFF;
+    LED_Para_Struct.CB_LED_State = LIGHT_OFF;
+    LED_Para_Struct.CW_LED_State = LIGHT_OFF;
+    LED_Para_Struct.CA_LED_State = LIGHT_OFF;
+    LED_Para_Struct.CC_LED_State = LIGHT_OFF;
+    LED_Para_Struct.AR_LED_State = LIGHT_OFF;
+    LED_Para_Struct.AG_LED_State = LIGHT_OFF;
+    LED_Para_Struct.AB_LED_State = LIGHT_OFF;
+    LED_Para_Struct.AW_LED_State = LIGHT_OFF;
+    LED_Para_Struct.MR_LED_State = LIGHT_OFF;
+    LED_Para_Struct.MG_LED_State = LIGHT_OFF;
+    LED_Para_Struct.MB_LED_State = LIGHT_OFF;
+    LED_Para_Struct.MW_LED_State = LIGHT_OFF;
+    LED_Para_Struct.Reserve_LED_State = LIGHT_OFF;
+    Camera_Focus_OFF();
+    Camera_Trig_OFF();
+    LED_Switch_Updata();
+}
+
+/* 从已校验的长度字段扣除两字节命令字，得到有效载荷长度。 */
+static uint16_t Comm_Payload_Size(void)
+{
+    const uint8_t *length = Comm_Function_Struct.Format_Data.Data_Len;
+    return (uint16_t)(((uint16_t)length[1] << 8) + length[0] - 2u);
+}
 
 void Comm_Function_Handler(void)
 {
@@ -256,6 +302,7 @@ void Comm_Function_Handler(void)
 
 				if((LED_Para_Struct.Device_ID == (Comm_Function_Struct.Format_Data.Data[1]<<8)+Comm_Function_Struct.Format_Data.Data[0])||(ALL_ID == (Comm_Function_Struct.Format_Data.Data[1]<<8)+Comm_Function_Struct.Format_Data.Data[0]))
 				{
+                    Rgbwac_Leave();
 					LED_Para_Struct.Area_LED.data = Comm_Function_Struct.Format_Data.Data[2];
 					LED_Para_Struct.Channel_Color.data = Comm_Function_Struct.Format_Data.Data[3];
 					LED_Para_Struct.Power = (Comm_Function_Struct.Format_Data.Data[5]<<8) + Comm_Function_Struct.Format_Data.Data[4];
@@ -273,6 +320,7 @@ void Comm_Function_Handler(void)
 
 				if((LED_Para_Struct.Device_ID == (Comm_Function_Struct.Format_Data.Data[1]<<8)+Comm_Function_Struct.Format_Data.Data[0])||(ALL_ID == (Comm_Function_Struct.Format_Data.Data[1]<<8)+Comm_Function_Struct.Format_Data.Data[0]))
 				{
+                    Rgbwac_Leave();
 					LED_Para_Struct.Relighting_parameter.Coordinate_X = (Comm_Function_Struct.Format_Data.Data[3]<<8)+Comm_Function_Struct.Format_Data.Data[2];
 					LED_Para_Struct.Relighting_parameter.Coordinate_Y = (Comm_Function_Struct.Format_Data.Data[5]<<8)+Comm_Function_Struct.Format_Data.Data[4];
 					LED_Para_Struct.Power = (Comm_Function_Struct.Format_Data.Data[7]<<8) + Comm_Function_Struct.Format_Data.Data[6];
@@ -308,6 +356,7 @@ void Comm_Function_Handler(void)
 			
 			case  CMD_Set_LED_Parameter_Material :                                /*材质解算模式下光源参数配置*/
 			 {
+                    Rgbwac_Leave();
 				 LED_Para_Struct.Material_solve_parameter.data_pake_num = (Comm_Function_Struct.Format_Data.Data[1]<<8)+Comm_Function_Struct.Format_Data.Data[0];   //数据包序号
 				 LED_Para_Struct.Material_solve_parameter.sub_pake_num = Comm_Function_Struct.Format_Data.Data[2];
         /*一帧数据中的分包数据包含49个光源数据，首先先确定光源ID对应的数据在第几个分包数据中，再确定光源ID对应的数据在分包数据中的位置*/
@@ -337,6 +386,7 @@ void Comm_Function_Handler(void)
 			 
 			 case  CMD_Set_OLAT_mode_parameter :                                /*OLAT模式下光源参数配置*/
 			 {
+                    Rgbwac_Leave();
 				 LED_Para_Struct.OLAT_parameter.data_pake_num = (Comm_Function_Struct.Format_Data.Data[1]<<8)+Comm_Function_Struct.Format_Data.Data[0];   //数据包序号
 				 LED_Para_Struct.OLAT_parameter.sub_pake_num = Comm_Function_Struct.Format_Data.Data[2];                                                  //分包号
         /*一帧数据中的分包数据包含97个光源数据，首先先确定光源ID对应的数据在第几个分包数据中，再确定光源ID对应的数据在分包数据中的位置*/
@@ -366,6 +416,7 @@ void Comm_Function_Handler(void)
 			 
 			 case  CMD_Set_Relighting_mode_parameter :                                /*重光照模式下光源参数配置*/
 			 {
+                Rgbwac_Leave();
 				 LED_Para_Struct.Relighting_parameter.data_pake_num = (Comm_Function_Struct.Format_Data.Data[1]<<8)+Comm_Function_Struct.Format_Data.Data[0];   //数据包序号
 				 LED_Para_Struct.Relighting_parameter.sub_pake_num = Comm_Function_Struct.Format_Data.Data[2];
         /*一帧数据中的分包数据包含49个光源数据，首先先确定光源ID对应的数据在第几个分包数据中，再确定光源ID对应的数据在分包数据中的位置*/
@@ -386,8 +437,21 @@ void Comm_Function_Handler(void)
 				 }
 			 }
 			 break;
-			 
-			 
+
+            case CMD_RGBWAC_PREPARE: /* 进入六通道路径，载荷为两字节帧数。 */
+                if(Comm_Payload_Size() == 2u)
+                {
+                    const uint8_t *data = Comm_Function_Struct.Format_Data.Data;
+                    if(!Rgbwac_IsSelected()) RGBWAC_Stop_Legacy_Output();
+                    Rgbwac_Prepare((uint16_t)(data[0] | ((uint16_t)data[1] << 8)),
+                                   LED_Para_Struct.Device_ID);
+                }
+                break;
+
+            case CMD_RGBWAC_RECORDS: /* 复用原收帧校验，六通道模块再按本机 ID 取数。 */
+                Rgbwac_Receive(Comm_Function_Struct.Format_Data.Data, Comm_Payload_Size());
+                break;
+
 			 case  CMD_parameter_Set_Over :                                /*参数配置完成*/
 			 {
 				 if(LED_Para_Struct.Mode == Material_solve_MODE)
@@ -434,7 +498,16 @@ void Comm_Function_Handler(void)
 
 			case CMD_Set_Loopdata_parameter:  /*循环数据组配置*/
 			{
-				LED_Para_Struct.Data_Cycle_quantity = ((Comm_Function_Struct.Format_Data.Data[1]<<8)+ Comm_Function_Struct.Format_Data.Data[0])+0x01;        /*循环数据量*/
+				if(Rgbwac_IsSelected())
+                {
+                    if(Comm_Payload_Size() == 2u)
+                    {
+                        const uint8_t *data = Comm_Function_Struct.Format_Data.Data;
+                        Rgbwac_SetLoopLength((uint16_t)(data[0] | ((uint16_t)data[1] << 8)));
+                    }
+                    break;
+                }
+                LED_Para_Struct.Data_Cycle_quantity = ((Comm_Function_Struct.Format_Data.Data[1]<<8)+ Comm_Function_Struct.Format_Data.Data[0])+0x01;        /*循环数据量*/
 
 			}
 			break;
@@ -446,6 +519,7 @@ void Comm_Function_Handler(void)
 			{
 				if(LED_Para_Struct.Device_ID == (Comm_Function_Struct.Format_Data.Data[1]<<8)+Comm_Function_Struct.Format_Data.Data[0])
 				{
+                    Rgbwac_Leave();
 					LED_Para_Struct.Device_ID = (Comm_Function_Struct.Format_Data.Data[3]<<8)+Comm_Function_Struct.Format_Data.Data[2];
 				
 				
@@ -465,7 +539,8 @@ void Comm_Function_Handler(void)
 
 			case CMD_Set_MODE:/* 设置模式 */
 			{
-				LED_Para_Struct.Mode = Comm_Function_Struct.Format_Data.Data[0];
+				Rgbwac_Leave();
+                LED_Para_Struct.Mode = Comm_Function_Struct.Format_Data.Data[0];
 				
 				/* 参数保存 */		
 //				LED_Para_Struct.OLAT_cnt = 0;
@@ -509,6 +584,11 @@ void Comm_Function_Handler(void)
 			
 			case CMD_Set_start:      /*软起动*/
 			{
+                if(Rgbwac_IsSelected())
+                {
+                    Rgbwac_Start();
+                    break;
+                }
   			LED_Para_Struct.Trig_Cnt = 0;      //触发次数清0
 				LED_Para_Struct.Camera_Trig_cnt = 0;
 				HAL_NVIC_EnableIRQ(EXTI0_IRQn);    //外部中断开启
@@ -519,6 +599,11 @@ void Comm_Function_Handler(void)
 			
 			case CMD_Set_stop:      /*停止*/
 			{
+                if(Rgbwac_IsSelected())
+                {
+                    Rgbwac_Stop();
+                    break;
+                }
   			LED_Para_Struct.Trig_Cnt = 0;      //触发次数清0
 				LED_Para_Struct.Camera_Trig_cnt = 0;
 				HAL_NVIC_DisableIRQ(EXTI0_IRQn);    //外部中断关闭
@@ -536,6 +621,7 @@ void Comm_Function_Handler(void)
 				LED_Para_Struct.Upgrade_Size = Comm_Function_Struct.Format_Data.Data[1];
 				if(LED_Para_Struct.Upgrade_Device == 0x00 )   /*光源固件升级*/
 				{
+                    Rgbwac_Leave();
 					if(Bootloader_Address_Struct.APP_Run_Flag ==  APP_Backup1)
 					{
 						STM32_Flash_Erase(GetSector(APP_Backup2_ADDR), APP_Sectors_NUM); // Erase app running area	
@@ -580,6 +666,7 @@ void Comm_Function_Handler(void)
 				LED_Para_Struct.Upgrade_Device = Comm_Function_Struct.Format_Data.Data[0];
 				if(LED_Para_Struct.Upgrade_Device == 0x00 )   /*光源固件升级*/
 				{
+                    Rgbwac_Leave();
 					
 					if( Bootloader_Address_Struct.APP_Run_Flag ==  APP_Backup1)			
 					{
@@ -762,9 +849,6 @@ void Parameter_Init(void)/* 参数初始化*/
 	
  // LED_Para_TypeDef LED_Para_Struct= {0};
 	
-	Material_solve_parameter_Typedef  Material_solve_parameter_Struct = {0};
-	OLAT_parameter_Typedef     OLAT_parameter_Struct ={0};
-  Relighting_parameter_Typedef  Relighting_parameter_Struct ={0};
 	
 	LED_Para_Struct._18b20_EN =  SET;
   LED_Para_Struct.Start_LED_TRIG_ON = 0;
@@ -892,6 +976,12 @@ void LED_Power_Updata(void)
 
 void LED_State_Updata(void)
 {
+    /* 六通道播放接管输出时，由专用状态机驱动灯板。 */
+    if(Rgbwac_IsSelected())
+    {
+        Rgbwac_Service();
+        return;
+    }
 	switch(LED_Para_Struct.Mode)
 	{
 		case Install_adjust_MODE:    //装调模式
@@ -1477,6 +1567,7 @@ void LED_Dimming_Updata(void)
 }
 void LED_Relighting_state_Updata(void)	
 {
+
 	if(LED_Para_Struct.Relighting_State_LED == 0)
 	{
 		LED_Para_Struct.Relighting_parameter.State_LED_R = LIGHT_OFF;

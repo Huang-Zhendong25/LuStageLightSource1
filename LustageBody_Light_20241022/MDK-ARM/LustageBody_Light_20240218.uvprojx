@@ -525,6 +525,11 @@
               <FileType>1</FileType>
               <FilePath>..\Core\Src\user.c</FilePath>
             </File>
+            <File>
+              <FileName>rgbwac.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\rgbwac.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
